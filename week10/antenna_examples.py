@@ -1,7 +1,7 @@
 import numpy as np
 from astropy import units as u
 
-def ew_line(spacing=400*u.m,nant=8):
+def ew_line(length=400*u.m,nant=8,log=False):
     """
     Example of a two-element interferometer with a line of sight along the x-axis.
     
@@ -17,13 +17,24 @@ def ew_line(spacing=400*u.m,nant=8):
     antenna_positions : ndarray, shape (2, 3)
         Positions of the two antennas in 3D space (x, y, z).
     """
-    # Convert spacing to meters
-    spacing_m = spacing.to(u.m).value
-    
-    # Antenna positions:
-    antenna_positions = np.zeros((nant, 3))
-    for i in range(nant):
-        antenna_positions[i] = [i * spacing_m, 0, 0]
+
+    if log:
+        # Calculate spacing between antennas logarithmically
+        spacing = np.logspace(1, np.log10(length.to(u.m).value), nant)
+        sign_alternater = 1
+        antenna_positions = np.zeros((nant, 3))
+        for i in range(nant):
+            antenna_positions[i] = [sign_alternater*spacing[i], 0, 0]
+            sign_alternater *= -1  # Alternate the sign for each antenna
+    else:
+        spacing = length / (nant - 1)  # Calculate spacing between antennas
+        # Convert spacing to meters
+        spacing_m = spacing.to(u.m).value
+        
+        # Antenna positions:
+        antenna_positions = np.zeros((nant, 3))
+        for i in range(nant):
+            antenna_positions[i] = [(i-nant/2) * spacing_m, 0, 0]
     return antenna_positions
 
 def vla(config='A'):
@@ -129,10 +140,12 @@ def spiral_array(nant, start_length, length_increment, angle_increment, start_an
     
     return antenna_positions
 
-def inner_outer_array(nin,nout,out_scale=3000*u.m, in_scale=800*u.m):
+def inner_outer_array(nin,nout,out_scale=3000*u.m, in_scale=800*u.m,angle_increment=None):
+    if angle_increment is None:
+            angle_increment = 360*u.deg/nout if nout>0 else 90*u.deg
     
     antenna_inner = gaussian_cloud(nant=nin, dispersion=in_scale)
-    antenna_outer = spiral_array(nant=nout, start_length=out_scale, length_increment=100*u.m, angle_increment=194.4*u.deg, start_angle=0*u.deg)
+    antenna_outer = spiral_array(nant=nout, start_length=out_scale, length_increment=100*u.m, angle_increment=angle_increment, start_angle=0*u.deg)
     
     antenna_positions = np.append(antenna_inner, antenna_outer, axis=0)
     
