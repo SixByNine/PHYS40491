@@ -56,7 +56,10 @@ def dirty_beam_plot(dirty_image, psf, uv_tracks, image_halfwidth, original_image
     plt.axis("equal")
     plt.subplot(2, 2, 2)
     plt.title("Dirty beam (point spread function)")
-    plt.imshow(psf, cmap='gray', extent=[-image_halfwidth, image_halfwidth, -image_halfwidth, image_halfwidth],vmax=0.1,interpolation='nearest')
+    beam_halfwidth = 2 * image_halfwidth
+    plt.imshow(psf, cmap='gray', extent=[-beam_halfwidth, beam_halfwidth, -beam_halfwidth, beam_halfwidth],vmax=0.1,interpolation='nearest')
+    plt.xlim(-image_halfwidth, image_halfwidth)
+    plt.ylim(-image_halfwidth, image_halfwidth)
     plt.xlabel(r"$\theta_x$ [arcsec]")
     plt.ylabel(r"$\theta_y$ [arcsec]")
     plt.colorbar(label=r"$|B(\theta_x,\theta_y)|$")
@@ -78,7 +81,7 @@ def dirty_beam_plot(dirty_image, psf, uv_tracks, image_halfwidth, original_image
         plt.savefig(img_name, dpi=300)
     plt.show()
 
-def uv_and_dirty_image(V_full, V_masked, uv_tracks, antenna, _u, _v, image_halfwidth,img_name=None):
+def uv_and_dirty_image(V_full, V_masked, beam_peak, uv_tracks, antenna, _u, _v, image_halfwidth,img_name=None):
     # 2 rows x 3 columns:
     # Antenna | Full UV | Full-plane inverse FT
     # Tracks  | Sampled UV | Dirty image
@@ -88,7 +91,7 @@ def uv_and_dirty_image(V_full, V_masked, uv_tracks, antenna, _u, _v, image_halfw
     ).real
     dirty_image = np.fft.fftshift(
         np.fft.ifft2(np.fft.ifftshift(V_masked))
-    ).real
+    ).real / beam_peak  # Normalize dirty image by the peak of the dirty beam
 
     # Fourfold font scaling for lecture-slide readability, scoped to this figure.
     with plt.rc_context({"font.size": 20}):

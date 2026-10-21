@@ -4,7 +4,7 @@ from PIL import Image, ImageOps
 import astropy.units as u
 
 
-def read_image_as_map(image_path, image_size=1.0*u.arcmin, peak_flux=1.0*u.Jy,invert=False, logscale=False):
+def read_image_as_map(image_path, image_size=1.0*u.arcmin, peak_flux=1.0*u.Jy,invert=False, logscale=False,top_factor=1.0):
     """
     Read an image file and return it as a 2D numpy array (sky brightness map).
     
@@ -41,25 +41,34 @@ def read_image_as_map(image_path, image_size=1.0*u.arcmin, peak_flux=1.0*u.Jy,in
 
     if invert:
         img_gray = ImageOps.invert(img_gray)
-    sky_map = np.array(img_gray)
+    sky_map = np.array(img_gray).astype(float)
 
     if logscale:
         # Image was in log scale, convert back to linear scale
         sky_map = 10**(sky_map / 255.0)
         sky_map -= np.amin(sky_map)  # Shift to make minimum zero
-        
+
+    max_value = np.amax(sky_map)
+    max_mask = sky_map > 0.99*max_value
+
     # Make sky map in Jy/steradian
     sky_map = (sky_map / np.amax(sky_map)) * peak_flux.to(u.Jy).value / (pixel_scale**2)  # Jy/steradian
+
+    sky_map[max_mask] *= top_factor
     
     return sky_map, pixel_scale
 
 
-def point_source_map(pixel_scale, npix, source_position=(0, 0), source_flux=1.0*u.Jy):
+def point_source_map(image_size, npix, source_positions=[(0, 0)], source_flux=1.0*u.Jy):
     """
     Create a 2D map with a point source.
     
     Parameters
     ----------
+    image_size : float
+        Angular size of the image
+    npix : int
+        Number of pixels along each image dimension.
     source_position : tuple of float
         Position of the point source in pixel coordinates (x, y).
     source_flux : float
@@ -70,17 +79,21 @@ def point_source_map(pixel_scale, npix, source_position=(0, 0), source_flux=1.0*
     sky_map : ndarray, shape (npix, npix)
         2D array representing the sky brightness map with a point source.
     """
+
+    pixel_scale = (image_size / npix).to(u.rad).value  # radians per pixel
+
     sky_map = np.zeros((npix, npix))
     
     # Convert source position from pixel coordinates to array indices
-    x_idx = int(npix/2 + source_position[0])
-    y_idx = int(npix/2 + source_position[1])
+    for source_position in source_positions:
+        x_idx = int(npix/2 + source_position[0])
+        y_idx = int(npix/2 + source_position[1])
     
-    # Ensure indices are within bounds
-    if 0 <= x_idx < npix and 0 <= y_idx < npix:
-        sky_map[y_idx, x_idx] = source_flux.to(u.Jy).value / (pixel_scale**2)  # Jy/steradian
-    
-    return sky_map
+        # Ensure indices are within bounds
+        if 0 <= x_idx < npix and 0 <= y_idx < npix:
+            sky_map[y_idx, x_idx] = source_flux.to(u.Jy).value / (pixel_scale**2)  # Jy/steradian
+        
+    return sky_map, pixel_scale
 
 def gaussian_beam(pixel_scale, npix,fwhm=30*u.arcsec):
     """
@@ -288,7 +301,8 @@ def make_uv_coverage(
 
 
 
-def make_uv_data(image, u_tracks, v_tracks, pixel_scale):
+def make_uv_data(image, u_tracks, v_tracks, pixel_scale, weighting="Uniform",
+                 taper_fwhm=None):
     """
     Fourier transform an image and sample it at specified u-v tracks.
 
@@ -312,6 +326,25 @@ def make_uv_data(image, u_tracks, v_tracks, pixel_scale):
     pixel_scale : float
         Image pixel scale in radians/pixel.
 
+    weighting : {"Natural", "Uniform"}, default "Uniform"
+        Visibility weighting scheme (case-insensitive).
+
+        "Natural": every measured sample has equal weight (equal noise
+        variance), so a uv cell is weighted by the number of samples in it.
+        This gives the best point-source sensitivity but a broader beam with
+        higher sidelobes, because densely sampled short baselines dominate.
+
+        "Uniform": each occupied uv cell has the same total weight (each
+        sample is weighted by 1/number of samples in its cell). This gives a
+        narrower beam and lower sidelobes at the cost of sensitivity.
+
+    taper_fwhm : float or None, default None
+        If given, multiply the weights by a circular Gaussian taper in the
+        u-v plane with this FWHM in wavelengths (weight 0.5 at
+        |uv| = taper_fwhm / 2). This down-weights long baselines, giving a
+        broader, smoother beam and better sensitivity to extended emission.
+        The taper can be combined with either weighting scheme.
+
     Returns
     -------
     _u : ndarray
@@ -324,14 +357,17 @@ def make_uv_data(image, u_tracks, v_tracks, pixel_scale):
         Full Fourier transform of the image.
 
     V_masked : ndarray
-        Fourier plane containing the measured visibilities and their
-        conjugate points. Unsampled pixels are zero.
+        Fourier plane containing the weighted measured visibilities and their
+        conjugate points. Unsampled pixels are zero. Weights are normalised
+        to sum to 1, so the inverse FFT of V_masked is the dirty image.
 
     mask : ndarray of bool
         Sampling mask. True for both measured and conjugate points.
 
     dirty_beam : ndarray
-        Dirty beam (point spread function) corresponding to the sampling mask.
+        Dirty beam (point spread function) for the chosen weighting and
+        taper, with shape (2*N, 2*N). Its pixel scale and peak normalization
+        match the dirty image, but it covers twice the angular extent.
     """
 
     N = image.shape[0]
@@ -398,6 +434,10 @@ def make_uv_data(image, u_tracks, v_tracks, pixel_scale):
     # Add the actual measured u-v points
     mask[iv[valid], iu[valid]] = True
 
+    # Number of samples in each uv cell (used for weighting)
+    counts = np.zeros((N, N))
+    np.add.at(counts, (iv[valid], iu[valid]), 1)
+
     # Add the conjugate points:
     #
     #       V(-u,-v) = V*(u,v)
@@ -408,6 +448,33 @@ def make_uv_data(image, u_tracks, v_tracks, pixel_scale):
     )
 
     mask[iv_conj[valid_conj], iu_conj[valid_conj]] = True
+    np.add.at(counts, (iv_conj[valid_conj], iu_conj[valid_conj]), 1)
+
+    # ------------------------------------------------------------------
+    # Visibility weights
+    # ------------------------------------------------------------------
+
+    scheme = str(weighting).lower()
+    if scheme == "natural":
+        weights = counts.copy()
+    elif scheme == "uniform":
+        weights = mask.astype(float)
+    else:
+        raise ValueError("weighting must be 'Natural' or 'Uniform'")
+
+    if taper_fwhm is not None:
+        if taper_fwhm <= 0:
+            raise ValueError("taper_fwhm must be positive")
+        uu, vv = np.meshgrid(_u, _v)
+        sigma = taper_fwhm / (2 * np.sqrt(2 * np.log(2)))
+        weights *= np.exp(-(uu**2 + vv**2) / (2 * sigma**2))
+
+    weights[~mask] = 0.0
+
+    total = weights.sum()
+    if total == 0:
+        raise ValueError("no u-v samples fall inside the Fourier grid")
+    weights /= total
 
     # ------------------------------------------------------------------
     # Apply the mask to the full visibility plane
@@ -415,18 +482,26 @@ def make_uv_data(image, u_tracks, v_tracks, pixel_scale):
 
     V_masked = np.zeros_like(V_full)
 
-    V_masked[mask] = V_full[mask]
+    V_masked = V_full* weights
 
     # ------------------------------------------------------------------
     # Compute the dirty beam
     # ------------------------------------------------------------------
 
+    # Insert zeros between uv cells to halve the uv-grid spacing. The inverse
+    # transform then samples the beam at the image pixel scale over twice the
+    # field of view. Preserve the original FFT normalization for dirty-image
+    # normalization below.
+    beam_size = 2 * N
+    beam_indices = 2 * (np.arange(N) - N // 2) + beam_size // 2
+    beam_weights = np.zeros((beam_size, beam_size), dtype=weights.dtype)
+    beam_weights[np.ix_(beam_indices, beam_indices)] = weights
+
     dirty_beam = np.fft.fftshift(
         np.fft.ifft2(
-            np.fft.ifftshift(mask.astype(float))
+            np.fft.ifftshift(beam_weights)
         )
-    ).real
+    ).real * 4
 
     return _u, _v, V_full, V_masked, mask, dirty_beam
-
 
